@@ -13,30 +13,21 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
     );
   }
 
-  // Fallbacks / mockup defaults if live data is not fully populated
-  const battery = telemetry?.battery_pct != null ? `${telemetry.battery_pct}%` : '87%';
-  const speed = location?.speed != null ? `${Math.round(location.speed * 3.6)} km/h` : '32 km/h';
-  const accuracy = location?.accuracy != null ? `${Math.round(location.accuracy)} m` : '8 m';
-  const lastSeen = telemetry?.timestamp_formatted || '12 sec ago';
+  // Read real data values with clean N/A fallbacks
+  const batteryPct = telemetry?.battery_pct != null ? telemetry.battery_pct : device.battery_pct;
+  const battery = batteryPct != null ? `${batteryPct}%` : 'N/A';
+  const speed = location?.speed != null ? `${Math.round(location.speed * 3.6)} km/h` : 'N/A';
+  const accuracy = location?.accuracy != null ? `${Math.round(location.accuracy)} m` : 'N/A';
+  const lastSeen = telemetry?.timestamp_formatted || (location?.timestamp_formatted ? `${location.timestamp_formatted} (FMDN)` : 'N/A');
   
-  const latitude = location?.latitude || 12.9901;
-  const longitude = location?.longitude || 80.2565;
-  const coordinates = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+  const latitude = location?.latitude;
+  const longitude = location?.longitude;
+  const coordinates = latitude != null && longitude != null ? `${latitude.toFixed(6)}, ${longitude.toFixed(6)}` : 'N/A';
 
-  // Meta mapping based on selected device type/name
-  let studentName = 'Arjun Kumar';
-  let parentInfo = 'Ravi Kumar (98400 12345)';
-  let schoolName = 'ABC Matric. Hr. Sec. School';
-
-  if (device.name.toLowerCase().includes('samsung')) {
-    studentName = 'Sarah Jenkins';
-    parentInfo = 'Mark Jenkins (94452 98765)';
-    schoolName = 'Oakridge International';
-  } else if (device.name.toLowerCase().includes('esp')) {
-    studentName = 'Rahul Dravid';
-    parentInfo = 'Sanjay Dravid (91234 56789)';
-    schoolName = 'KV IIT Campus';
-  }
+  // Read meta settings
+  const studentName = 'Not Assigned';
+  const parentInfo = 'Not Assigned';
+  const schoolName = 'Not Assigned';
 
   return (
     <div className="detail-pane">
@@ -115,9 +106,13 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
               <div className="detail-card-row">
                 <span className="row-label">Map View</span>
                 <span className="row-value">
-                  <a href={`https://www.google.com/maps?q=${latitude},${longitude}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-brand)', textDecoration: 'none', fontWeight: 600 }}>
-                    View on Google Maps
-                  </a>
+                  {latitude != null && longitude != null ? (
+                    <a href={`https://www.google.com/maps?q=${latitude},${longitude}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-brand)', textDecoration: 'none', fontWeight: 600 }}>
+                      View on Google Maps
+                    </a>
+                  ) : (
+                    'N/A'
+                  )}
                 </span>
               </div>
             </div>
@@ -147,22 +142,14 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
         {activeTab === 'history' && (
           <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             <p style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>Breadcrumb History Trail</p>
-            <ul>
-              <li>02:46 PM - 12.9901, 80.2565 (Speed: 32 km/h)</li>
-              <li>02:41 PM - 12.9885, 80.2550 (Speed: 28 km/h)</li>
-              <li>02:36 PM - 12.9850, 80.2512 (Speed: 30 km/h)</li>
-            </ul>
+            <p>No tracking history recorded. Toggle "Start Live Tracking" to collect coordinate breadcrumbs.</p>
           </div>
         )}
 
         {activeTab === 'events' && (
           <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             <p style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>Device Event Log</p>
-            <ul>
-              <li>🟢 02:46 PM - Location check normal</li>
-              <li>🔵 02:44 PM - Entered school main fence</li>
-              <li>🟡 02:36 PM - Strap status normal</li>
-            </ul>
+            <p>No events logged. Location and status updates will register here during active sync.</p>
           </div>
         )}
 
@@ -172,13 +159,13 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
             <br />
             &nbsp;&nbsp;"canonic_id": "{device.canonic_id}",
             <br />
-            &nbsp;&nbsp;"battery": {telemetry?.battery_pct || 87},
+            &nbsp;&nbsp;"battery": {batteryPct != null ? batteryPct : "null"},
             <br />
             &nbsp;&nbsp;"events": {JSON.stringify(telemetry?.active_events || [])},
             <br />
-            &nbsp;&nbsp;"last_lat": {latitude},
+            &nbsp;&nbsp;"last_lat": {latitude != null ? latitude : "null"},
             <br />
-            &nbsp;&nbsp;"last_lng": {longitude}
+            &nbsp;&nbsp;"last_lng": {longitude != null ? longitude : "null"}
             <br />
             {"}"}
           </div>

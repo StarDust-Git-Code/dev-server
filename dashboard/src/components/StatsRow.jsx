@@ -1,6 +1,6 @@
 export default function StatsRow({ devices, deviceStatuses, alertsCount }) {
   // Compute metrics dynamically from the live devices list and status cache
-  const totalCount = devices.length || 6; // Mockup fallback to match screen if empty
+  const totalCount = devices.length;
   
   let onlineCount = 0;
   let offlineCount = 0;
@@ -17,23 +17,12 @@ export default function StatsRow({ devices, deviceStatuses, alertsCount }) {
       offlineCount++;
     }
 
-    // Check battery if telemetry exists
-    // (In a real app, this would be fetched from telemetry_cache)
-    if (device.battery_pct != null && device.battery_pct < 20) {
+    // Check battery
+    const batteryPct = device.battery_pct;
+    if (batteryPct != null && batteryPct < 20) {
       lowBatteryCount++;
     }
   });
-
-  // Fallbacks to match mockup visual values if no live devices yet
-  if (devices.length === 0) {
-    onlineCount = 118;
-    movingCount = 67;
-    offlineCount = 8;
-    lowBatteryCount = 5;
-  } else {
-    // Estimate moving devices as a fraction of online ones for visual completeness
-    movingCount = Math.max(1, Math.floor(onlineCount * 0.5));
-  }
 
   const stats = [
     {
@@ -61,7 +50,7 @@ export default function StatsRow({ devices, deviceStatuses, alertsCount }) {
       bgColor: '#fefbeb',
     },
     {
-      value: alertsCount || 2,
+      value: alertsCount || 0,
       label: 'Alerts',
       subtext: 'Require attention',
       icon: '🚨',
@@ -77,7 +66,7 @@ export default function StatsRow({ devices, deviceStatuses, alertsCount }) {
       bgColor: '#f8fafc',
     },
     {
-      value: lowBatteryCount || 5,
+      value: lowBatteryCount,
       label: 'Low Battery',
       subtext: 'Below 20%',
       icon: '🔋',
