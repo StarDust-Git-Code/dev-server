@@ -3,6 +3,7 @@
 #  A Flask REST API wrapping the existing Python modules
 #
 
+import os
 import binascii
 import datetime
 import hashlib
@@ -12,6 +13,19 @@ import threading
 
 from flask import Flask, jsonify, request as flask_request
 from flask_cors import CORS
+
+# Write secrets.json from SECRETS_JSON environment variable if present (for cloud-based deployment)
+secrets_env = os.environ.get("SECRETS_JSON")
+if secrets_env:
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        secrets_path = os.path.join(script_dir, "Auth", "secrets.json")
+        os.makedirs(os.path.join(script_dir, "Auth"), exist_ok=True)
+        with open(secrets_path, "w") as f:
+            f.write(secrets_env)
+        print("[API] Successfully initialized Auth/secrets.json from SECRETS_JSON env variable.")
+    except Exception as e:
+        print(f"[API] Error writing SECRETS_JSON to secrets.json: {e}")
 
 from NovaApi.ListDevices.nbe_list_devices import request_device_list
 from NovaApi.ExecuteAction.LocateTracker.location_request import create_location_request
@@ -32,7 +46,7 @@ from KeyBackup.cloud_key_decryptor import decrypt_aes_gcm
 from SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import refresh_custom_trackers
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # In-memory cache for multiplexed EID groups
 WATCH_1_GROUP_CACHE = []
@@ -364,6 +378,7 @@ def get_device_telemetry(device_id):
 if __name__ == '__main__':
     print("=" * 50)
     print("  GoogleFindMyTools API Server")
-    print("  http://localhost:5000")
+    port = int(os.environ.get("PORT", 5000))
+    print(f"  Running on port {port}")
     print("=" * 50)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)

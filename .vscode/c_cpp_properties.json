@@ -8,7 +8,7 @@
         {
             "name": "PlatformIO",
             "includePath": [
-                "C:/Users/irsha/Desktop/GoogleFindMyTools-main/ESP32Firmware/src",
+                "C:/Users/irsha/Desktop/projects/GoogleFindMyTools-main/ESP32Firmware/src",
                 "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
                 "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                 "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
@@ -243,7 +243,7 @@
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
-                    "C:/Users/irsha/Desktop/GoogleFindMyTools-main/ESP32Firmware/src",
+                    "C:/Users/irsha/Desktop/projects/GoogleFindMyTools-main/ESP32Firmware/src",
                     "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
                     "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                     "C:/Users/irsha/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",

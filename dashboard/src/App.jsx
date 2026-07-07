@@ -8,7 +8,7 @@ import { useDevices } from './hooks/useDevices';
 import { useLocation } from './hooks/useLocation';
 import './index.css';
 
-const API_BASE = 'http://localhost:5000/api';
+import { API_BASE } from './config';
 const TRACKING_POLL_INTERVAL = 30000;
 
 // Haversine distance in meters
