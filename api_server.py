@@ -282,8 +282,31 @@ def _extract_locations(device_update_protobuf):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint."""
-    return jsonify({"status": "ok", "service": "GoogleFindMyTools API"})
+    """Health check and diagnostics endpoint."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    secrets_path = os.path.join(script_dir, "Auth", "secrets.json")
+    exists = os.path.exists(secrets_path)
+    has_env = os.environ.get("SECRETS_JSON") is not None
+    
+    valid_json = False
+    keys = []
+    if exists:
+        try:
+            with open(secrets_path, 'r') as f:
+                data = json.load(f)
+                valid_json = True
+                keys = list(data.keys())
+        except:
+            pass
+
+    return jsonify({
+        "status": "ok",
+        "service": "GoogleFindMyTools API",
+        "secrets_file_exists": exists,
+        "secrets_env_configured": has_env,
+        "secrets_file_valid_json": valid_json,
+        "secrets_keys": keys
+    })
 
 
 # Cache for custom BLE telemetry reports (rotating ID -> telemetry dict)
