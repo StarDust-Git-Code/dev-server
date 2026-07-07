@@ -75,7 +75,7 @@ def list_devices():
                     "canonic_id": canonic_id,
                 })
                 
-        if watch_1_group_ids:
+        if WATCH_1_GROUP_CACHE:
             devices.insert(0, {
                 "id": 999,
                 "name": "Child Safety Watch 1",
