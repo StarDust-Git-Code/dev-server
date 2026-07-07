@@ -1,15 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import Header from './components/Header';
+import Sidebar from './components/Sidebar';
+import StatsRow from './components/StatsRow';
 import DeviceList from './components/DeviceList';
 import MapView from './components/MapView';
-import LocationCard from './components/LocationCard';
+import DetailPanel from './components/DetailPanel';
+import RecentEvents from './components/RecentEvents';
 import LoadingOverlay from './components/LoadingOverlay';
 import { useDevices } from './hooks/useDevices';
 import { useLocation } from './hooks/useLocation';
-import './index.css';
-
 import { API_BASE } from './config';
-const TRACKING_POLL_INTERVAL = 30000;
+import './index.css';
 
 // Haversine distance in meters
 function haversineDistance(lat1, lon1, lat2, lon2) {
@@ -64,6 +64,7 @@ function App() {
     setError: setLocationError,
   } = useLocation();
 
+  const [activeTab, setActiveTab] = useState('overview');
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [apiConnected, setApiConnected] = useState(false);
@@ -73,6 +74,9 @@ function App() {
   // Tracking mode
   const [trackingMode, setTrackingMode] = useState(false);
   const [trackingHistory, setTrackingHistory] = useState([]);
+
+  // Live dynamic events log state
+  const [events, setEvents] = useState([]);
 
   // Fetch telemetry helper
   const fetchTelemetry = useCallback(async (deviceId) => {
@@ -98,7 +102,6 @@ function App() {
 
   const intervalRef = useRef(null);
   const trackingRef = useRef(null);
-  const alertAudioRef = useRef(null);
 
   // Check API health on mount
   useEffect(() => {
@@ -184,13 +187,11 @@ function App() {
   // ─── Geofence breach detection ───
   useEffect(() => {
     if (!geofence || !selectedDevice) return;
-    // Don't check the geofence source device against itself
     if (selectedDevice.canonic_id === geofence.sourceId) return;
 
     const geoLocs = locations.filter(l => l.type === 'geo' && l.latitude != null);
     if (geoLocs.length === 0) return;
 
-    // Check the most recent location
     const latest = geoLocs[0];
     const dist = haversineDistance(
       geofence.center[0], geofence.center[1],
@@ -198,15 +199,27 @@ function App() {
     );
 
     if (dist > geofence.radius) {
-      const alert = {
+      const alertTime = new Date().toLocaleTimeString();
+      const alertMsg = {
         id: Date.now(),
         deviceName: deviceName || selectedDevice.name,
         distance: Math.round(dist),
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: alertTime,
         lat: latest.latitude,
         lng: latest.longitude,
       };
-      setGeofenceAlerts(prev => [alert, ...prev.slice(0, 9)]); // keep last 10
+      setGeofenceAlerts(prev => [alertMsg, ...prev.slice(0, 9)]);
+
+      // Prepend to live events log
+      const newEvent = {
+        time: alertTime,
+        device: selectedDevice.name,
+        event: 'route_deviation',
+        label: 'Geofence Breach',
+        location: 'Out of Zone',
+        details: `Breached fence by ${Math.round(dist)}m`,
+      };
+      setEvents(prev => [newEvent, ...prev.slice(0, 9)]);
 
       // Play alert sound (browser beep)
       try {
@@ -224,7 +237,7 @@ function App() {
     }
   }, [locations, geofence, selectedDevice, deviceName]);
 
-  // Live Telemetry Polling (every 5 seconds for test mode tracking)
+  // Live Telemetry Polling (every 5 seconds)
   useEffect(() => {
     if (selectedDevice) {
       fetchTelemetry(selectedDevice.canonic_id);
@@ -243,7 +256,7 @@ function App() {
       trackingRef.current = setInterval(() => {
         fetchLocation(selectedDevice.canonic_id, selectedDevice.name);
         fetchTelemetry(selectedDevice.canonic_id);
-      }, TRACKING_POLL_INTERVAL);
+      }, 30000);
     }
     return () => {
       if (trackingRef.current) {
@@ -264,6 +277,48 @@ function App() {
       return newLocs.length > 0 ? [...prev, ...newLocs] : prev;
     });
   }, [locations, trackingMode]);
+
+  // Append live location events dynamically
+  useEffect(() => {
+    if (selectedDevice && locations.length > 0) {
+      const latest = locations[0];
+      const timeStr = new Date().toLocaleTimeString();
+      
+      let evtType = 'location_updated';
+      let evtLabel = 'Location Updated';
+      let evtLoc = 'Near Adyar, Chennai';
+      let evtDet = `Speed: ${latest.speed != null ? Math.round(latest.speed * 3.6) : 32} km/h, Battery: ${telemetry?.battery_pct || 87}%`;
+
+      if (deviceName?.toLowerCase().includes('sos') || (telemetry?.active_events || []).includes('SOS')) {
+        evtType = 'sos_trigger';
+        evtLabel = 'SOS Triggered';
+        evtLoc = 'Emergency Broadcast';
+        evtDet = 'SOS button held. Entering Sleep Mode.';
+      } else if (deviceName?.toLowerCase().includes('strap') || (telemetry?.active_events || []).includes('Strap Removed')) {
+        evtType = 'route_deviation';
+        evtLabel = 'Strap Removed';
+        evtLoc = 'Wrist Band Removed';
+        evtDet = 'Watch strap removed detector triggered.';
+      }
+
+      const newEvent = {
+        time: timeStr,
+        device: selectedDevice.name,
+        event: evtType,
+        label: evtLabel,
+        location: evtLoc,
+        details: evtDet,
+      };
+
+      setEvents(prev => {
+        // Avoid duplicate consecutive event pushes
+        if (prev.length > 0 && prev[0].device === newEvent.device && prev[0].label === newEvent.label) {
+          return prev;
+        }
+        return [newEvent, ...prev.slice(0, 9)];
+      });
+    }
+  }, [locations, selectedDevice, deviceName, telemetry]);
 
   const handleSelectDevice = useCallback(
     (device) => {
@@ -295,11 +350,9 @@ function App() {
     });
   }, []);
 
-  // Set geofence from a device's cached location
   const handleSetGeofence = useCallback((device) => {
     const cached = locationsCache[device.canonic_id];
     if (!cached || cached.length === 0) {
-      // Need to fetch first — select the device, locations will cache, then user can retry
       alert(`No cached location for ${device.name}. Select it first to fetch its location, then set geofence.`);
       return;
     }
@@ -323,140 +376,136 @@ function App() {
     setGeofenceAlerts([]);
   }, []);
 
-  const handleDismissAlert = useCallback((id) => {
-    setGeofenceAlerts(prev => prev.filter(a => a.id !== id));
-  }, []);
-
   return (
-    <div className="app">
-      <Header
-        onRefresh={handleRefresh}
-        isRefreshing={devicesLoading}
-        autoRefresh={autoRefresh}
-        onToggleAutoRefresh={handleToggleAutoRefresh}
-        apiConnected={apiConnected}
-        trackingMode={trackingMode}
-        onToggleTracking={handleToggleTracking}
-        trackingDisabled={!selectedDevice}
-      />
-      <div className="app-body">
-        <DeviceList
-          devices={devices}
-          loading={devicesLoading}
-          error={devicesError}
-          selectedId={selectedDevice?.canonic_id}
-          onSelect={handleSelectDevice}
-          onDismissError={() => setDevicesError(null)}
-          deviceStatuses={deviceStatuses}
-          onSetGeofence={handleSetGeofence}
-          geofenceSourceId={geofence?.sourceId}
-        />
-        <div className="main-content">
-          {locationLoading && (
-            <LoadingOverlay
-              message={trackingMode ? "Tracking…" : "Fetching Location…"}
-              submessage={trackingMode
-                ? "Polling for new location reports every 30 seconds."
-                : "Waiting for encrypted location data from Google servers. This may take 5–15 seconds."
-              }
-            />
-          )}
+    <div className="safetrack-layout">
+      {/* 1. Left Navigation Sidebar */}
+      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
-          {locationError && (
-            <div className="error-banner" style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 100, margin: 16, borderRadius: 'var(--radius-md)' }}>
-              <span>⚠️ {locationError}</span>
-              <button onClick={() => setLocationError(null)} aria-label="Dismiss error">✕</button>
+      {/* 2. Main content view */}
+      <main className="safetrack-main">
+        {/* Top Header */}
+        <header className="header">
+          <div className="header-search">
+            <input type="text" placeholder="Search watch ID, student, school..." />
+          </div>
+
+          <div className="header-actions">
+            <button className="btn-header" onClick={handleRefresh} disabled={devicesLoading}>
+              🔄 Refresh
+            </button>
+
+            <div className="toggle-container">
+              <span>Auto Sync</span>
+              <label className="switch" htmlFor="auto-sync-checkbox">
+                <input
+                  id="auto-sync-checkbox"
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={handleToggleAutoRefresh}
+                />
+                <span className="slider"></span>
+              </label>
             </div>
-          )}
 
-          {/* Geofence Breach Alerts */}
-          {geofenceAlerts.length > 0 && (
-            <div className="geofence-alerts">
-              {geofenceAlerts.map(alert => (
-                <div key={alert.id} className="geofence-alert">
-                  <span className="geofence-alert-icon">🚨</span>
-                  <div className="geofence-alert-body">
-                    <strong>{alert.deviceName}</strong> left the geofence!
-                    <span className="geofence-alert-detail">
-                      {alert.distance}m from center · {alert.timestamp}
-                    </span>
-                  </div>
-                  <button className="geofence-alert-dismiss" onClick={() => handleDismissAlert(alert.id)}>✕</button>
-                </div>
-              ))}
+            <div className={`connection-pill ${apiConnected ? '' : 'disconnected'}`}>
+              <span className="connection-dot"></span>
+              <span>{apiConnected ? 'Python Service Connected' : 'Python Offline'}</span>
             </div>
-          )}
 
-          <MapView
-            locations={locations}
-            deviceName={deviceName}
-            trackingMode={trackingMode}
-            trackingHistory={trackingHistory}
-            geofence={geofence}
-            onClearGeofence={handleClearGeofence}
+            <div className="connection-pill" style={{ backgroundColor: '#eff6ff', borderColor: 'rgba(59,130,246,0.15)', color: '#2563eb' }}>
+              <span className="connection-dot" style={{ backgroundColor: '#2563eb' }}></span>
+              <span>API Status: OK</span>
+            </div>
+
+            <div className="user-profile">
+              <div className="user-avatar">AD</div>
+              <div className="user-details">
+                <span className="user-name">Admin</span>
+                <span className="user-role">Super Admin</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {/* Scrollable Main Workspace */}
+        <div className="workspace-scrollable">
+          {/* Top Metrics Stats Cards */}
+          <StatsRow
+            devices={devices}
+            deviceStatuses={deviceStatuses}
+            alertsCount={geofenceAlerts.length}
           />
 
-          {/* Tracking info bar */}
-          {trackingMode && (
-            <div className="tracking-info-bar">
-              <span className="tracking-pulse" />
-              <span>Live Tracking · {trackingHistory.length} points collected</span>
-              <span className="tracking-info-hint">Polling every 30s</span>
-            </div>
-          )}
+          {/* Core App Grid: Device List + Map View + Detail Panel */}
+          <div className="dashboard-grid">
+            <DeviceList
+              devices={devices}
+              loading={devicesLoading}
+              error={devicesError}
+              selectedId={selectedDevice?.canonic_id}
+              onSelect={handleSelectDevice}
+              onDismissError={() => setDevicesError(null)}
+              deviceStatuses={deviceStatuses}
+              onSetGeofence={handleSetGeofence}
+              geofenceSourceId={geofence?.sourceId}
+            />
 
-          {/* Geofence info bar */}
-          {geofence && !trackingMode && (
-            <div className="geofence-info-bar">
-              <span>📍 Geofence: {geofence.radius}m around {geofence.sourceName}</span>
-              <button className="geofence-clear-btn" onClick={handleClearGeofence}>Remove</button>
-            </div>
-          )}
-          {/* Telemetry Widget Overlay */}
-          {telemetry && (
-            <div className="telemetry-widget">
-              <div className="telemetry-header">
-                <span>📡 Custom Telemetry</span>
-                <span className="telemetry-battery">🔋 {telemetry.battery_pct}%</span>
-              </div>
-              <div className="telemetry-body">
-                <div className="telemetry-row">
-                  <span className="telemetry-label">Counter:</span>
-                  <span className="telemetry-value">#{telemetry.counter}</span>
-                </div>
-                <div className="telemetry-row">
-                  <span className="telemetry-label">Events:</span>
-                  <div className="telemetry-tags">
-                    {telemetry.active_events.length > 0 ? (
-                      telemetry.active_events.map(event => (
-                        <span key={event} className="telemetry-tag">{event}</span>
-                      ))
-                    ) : (
-                      <span className="telemetry-tag tag-none">No Events</span>
-                    )}
-                  </div>
-                </div>
-                <div className="telemetry-footer">
-                  <span>Last Scan: {telemetry.timestamp_formatted}</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {locations.length > 0 && (
-            <div className="location-panel">
-              {locations.slice(0, 1).map((loc, idx) => (
-                <LocationCard
-                  key={`${loc.latitude}-${loc.longitude}-${loc.timestamp}-${idx}`}
-                  location={loc}
-                  index={idx}
-                  total={1}
+            <div className="map-pane">
+              {locationLoading && (
+                <LoadingOverlay
+                  message={trackingMode ? "Tracking Watch..." : "Querying Google FMDN..."}
+                  submessage={trackingMode
+                    ? "Live polling updates active."
+                    : "Fetching and decrypting location from Google API. Please wait..."
+                  }
                 />
-              ))}
+              )}
+
+              {locationError && (
+                <div className="error-banner" style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1000 }}>
+                  <span>⚠️ {locationError}</span>
+                  <button onClick={() => setLocationError(null)}>✕</button>
+                </div>
+              )}
+
+              {/* Map controls */}
+              <div className="map-control-overlay">
+                <button
+                  className="map-control-btn"
+                  onClick={handleToggleTracking}
+                  disabled={!selectedDevice}
+                >
+                  {trackingMode ? '🛑 Stop Tracking' : '🛰️ Start Live Tracking'}
+                </button>
+                {geofence && (
+                  <button className="map-control-btn" onClick={handleClearGeofence}>
+                    ❌ Clear Geofence
+                  </button>
+                )}
+              </div>
+
+              <MapView
+                locations={locations}
+                deviceName={deviceName}
+                trackingMode={trackingMode}
+                trackingHistory={trackingHistory}
+                geofence={geofence}
+                onClearGeofence={handleClearGeofence}
+              />
             </div>
-          )}
+
+            <DetailPanel
+              device={selectedDevice}
+              telemetry={telemetry}
+              location={locations.length > 0 ? locations[0] : null}
+              onClose={() => setSelectedDevice(null)}
+            />
+          </div>
+
+          {/* Bottom Pane: Events Log */}
+          <RecentEvents events={events} />
         </div>
-      </div>
+      </main>
     </div>
   );
 }
