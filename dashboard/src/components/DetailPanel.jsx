@@ -66,7 +66,7 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
               <div className="detail-stat-tile">
                 <span className="tile-label">📶 Signal</span>
                 <span className="tile-value-group">
-                  <span className="tile-value green">Strong (-62 dBm)</span>
+                  <span className="tile-value">N/A</span>
                 </span>
               </div>
               <div className="detail-stat-tile">
@@ -90,7 +90,7 @@ export default function DetailPanel({ device, telemetry, location, onClose }) {
               <div className="detail-stat-tile">
                 <span className="tile-label">📦 Version</span>
                 <span className="tile-value-group">
-                  <span className="tile-value">v2.3.1</span>
+                  <span className="tile-value">N/A</span>
                 </span>
               </div>
             </div>
