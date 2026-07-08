@@ -48,6 +48,10 @@ from SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids imp
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+# Cache for custom BLE telemetry reports (rotating ID -> telemetry dict)
+telemetry_cache = {}
+telemetry_lock = threading.Lock()
+
 # In-memory cache for multiplexed EID groups
 WATCH_1_GROUP_CACHE = []
 
@@ -66,21 +70,52 @@ def list_devices():
 
         devices = []
         for idx, (device_name, canonic_id) in enumerate(canonic_ids, start=1):
+            # Resolve battery from telemetry cache if present
+            battery_pct = None
+            cleaned_id = canonic_id.replace("-", "").lower()
+            prefix = cleaned_id[:6]
+            
+            with telemetry_lock:
+                if canonic_id in telemetry_cache:
+                    battery_pct = telemetry_cache[canonic_id].get("battery_pct")
+                if battery_pct is None:
+                    # Specific mapping check for test-1_C3
+                    if cleaned_id.startswith("6a3e56"):
+                        target_eid = "73e064d787129722a23cbc0239619b0192f3f418"
+                        if target_eid in telemetry_cache:
+                            battery_pct = telemetry_cache[target_eid].get("battery_pct")
+                    else:
+                        for key, val in telemetry_cache.items():
+                            if key.startswith(prefix) or prefix in key:
+                                battery_pct = val.get("battery_pct")
+                                break
+
             if "watch_1_" in device_name:
                 WATCH_1_GROUP_CACHE.append((device_name, canonic_id))
             else:
-                devices.append({
+                dev = {
                     "id": idx,
                     "name": device_name,
                     "canonic_id": canonic_id,
-                })
+                }
+                if battery_pct is not None:
+                    dev["battery_pct"] = battery_pct
+                devices.append(dev)
                 
         if WATCH_1_GROUP_CACHE:
-            devices.insert(0, {
+            watch_battery = None
+            with telemetry_lock:
+                if "child_watch_group" in telemetry_cache:
+                    watch_battery = telemetry_cache["child_watch_group"].get("battery_pct")
+            
+            watch_dev = {
                 "id": 999,
                 "name": "Child Safety Watch 1",
                 "canonic_id": "child_watch_group",
-            })
+            }
+            if watch_battery is not None:
+                watch_dev["battery_pct"] = watch_battery
+            devices.insert(0, watch_dev)
 
         return jsonify({"devices": devices})
     except Exception as e:
@@ -309,9 +344,7 @@ def health_check():
     })
 
 
-# Cache for custom BLE telemetry reports (rotating ID -> telemetry dict)
-telemetry_cache = {}
-telemetry_lock = threading.Lock()
+
 
 @app.route('/api/relay', methods=['POST'])
 def relay_telemetry():
