@@ -39,13 +39,13 @@ export default function DeviceList({
 
     // Battery filter
     let matchesBattery = true;
-    const battery = device.battery_pct != null ? device.battery_pct : 87; // Mock default
+    const battery = device.battery_pct;
     if (batteryFilter === 'low') {
-      matchesBattery = battery < 20;
+      matchesBattery = battery != null && battery < 20;
     } else if (batteryFilter === 'medium') {
-      matchesBattery = battery >= 20 && battery < 70;
+      matchesBattery = battery != null && battery >= 20 && battery < 70;
     } else if (batteryFilter === 'high') {
-      matchesBattery = battery >= 70;
+      matchesBattery = battery != null && battery >= 70;
     }
 
     // School filter (mock metadata match)
@@ -170,7 +170,7 @@ export default function DeviceList({
             const statusObj = deviceStatuses?.[device.canonic_id];
             
             // Resolve battery percentage
-            const batteryPct = device.battery_pct != null ? device.battery_pct : 87;
+            const batteryPct = device.battery_pct;
             const isGeofenceSource = geofenceSourceId === device.canonic_id;
 
             return (
@@ -202,12 +202,18 @@ export default function DeviceList({
                 </div>
 
                 <div className="device-card-right">
-                  <div className="battery-display">
-                    <span className={`battery-icon ${batteryPct < 20 ? 'battery-low' : batteryPct < 70 ? 'battery-medium' : 'battery-high'}`}>
-                      {batteryPct < 20 ? '🪫' : '🔋'}
-                    </span>
-                    <span>{batteryPct}%</span>
-                  </div>
+                  {batteryPct != null ? (
+                    <div className="battery-display">
+                      <span className={`battery-icon ${batteryPct < 20 ? 'battery-low' : batteryPct < 70 ? 'battery-medium' : 'battery-high'}`}>
+                        {batteryPct < 20 ? '🪫' : '🔋'}
+                      </span>
+                      <span>{batteryPct}%</span>
+                    </div>
+                  ) : (
+                    <div className="battery-display" style={{ opacity: 0.5 }}>
+                      <span>N/A</span>
+                    </div>
+                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
