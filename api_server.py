@@ -54,6 +54,7 @@ telemetry_lock = threading.Lock()
 
 # In-memory cache for multiplexed EID groups
 WATCH_1_GROUP_CACHE = []
+WATCH_2_GROUP_CACHE = []
 
 @app.route('/api/devices', methods=['GET'])
 def list_devices():
@@ -65,8 +66,9 @@ def list_devices():
         refresh_custom_trackers(device_list)
         canonic_ids = get_canonic_ids(device_list)
 
-        global WATCH_1_GROUP_CACHE
+        global WATCH_1_GROUP_CACHE, WATCH_2_GROUP_CACHE
         WATCH_1_GROUP_CACHE = []
+        WATCH_2_GROUP_CACHE = []
 
         devices = []
         for idx, (device_name, canonic_id) in enumerate(canonic_ids, start=1):
@@ -91,7 +93,13 @@ def list_devices():
                                 break
 
             if "watch_1_" in device_name:
-                WATCH_1_GROUP_CACHE.append((device_name, canonic_id))
+                # Exclude the old watch_1_normal since GoogleFindMyTools µC is used
+                if device_name != "watch_1_normal":
+                    WATCH_1_GROUP_CACHE.append((device_name, canonic_id))
+            elif "GoogleFindMyTools" in device_name:
+                WATCH_1_GROUP_CACHE.append(("watch_1_normal", canonic_id))
+            elif "watch_2_" in device_name:
+                WATCH_2_GROUP_CACHE.append((device_name, canonic_id))
             else:
                 dev = {
                     "id": idx,
@@ -117,6 +125,22 @@ def list_devices():
                 watch_dev["battery_pct"] = watch_battery
             devices.insert(0, watch_dev)
 
+        if WATCH_2_GROUP_CACHE:
+            watch2_battery = None
+            with telemetry_lock:
+                if "child_watch_2_group" in telemetry_cache:
+                    watch2_battery = telemetry_cache["child_watch_2_group"].get("battery_pct")
+            
+            watch2_dev = {
+                "id": 998,
+                "name": "Child Safety Watch 2",
+                "canonic_id": "child_watch_2_group",
+            }
+            if watch2_battery is not None:
+                watch2_dev["battery_pct"] = watch2_battery
+            # Insert below Watch 1
+            devices.insert(1, watch2_dev)
+
         return jsonify({"devices": devices})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -135,8 +159,11 @@ def locate_device():
 
         print(f"[API] Requesting location data for {name}...")
 
-        if canonic_id == "child_watch_group":
+        if canonic_id in ("child_watch_group", "child_watch_2_group"):
             import concurrent.futures
+            
+            group_cache = WATCH_1_GROUP_CACHE if canonic_id == "child_watch_group" else WATCH_2_GROUP_CACHE
+            watch_display_name = "Child Safety Watch 1" if canonic_id == "child_watch_group" else "Child Safety Watch 2"
             
             def fetch_single(d_name, d_canonic):
                 """Helper to fetch location for a single EID in the group."""
@@ -167,7 +194,7 @@ def locate_device():
             
             # Fetch all multiplexed EIDs in parallel to avoid 90-second delays
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [executor.submit(fetch_single, n, c) for n, c in WATCH_1_GROUP_CACHE]
+                futures = [executor.submit(fetch_single, n, c) for n, c in group_cache]
                 for future in concurrent.futures.as_completed(futures):
                     locs, d_name = future.result()
                     for l in locs:
@@ -187,13 +214,13 @@ def locate_device():
             
             # Inject fake telemetry so dashboard shows it
             with telemetry_lock:
-                telemetry_cache["child_watch_group"] = {
+                telemetry_cache[canonic_id] = {
                     "battery_pct": 100, # Fake, or could be passed
                     "active_events": [latest_status] if latest_status != "Normal" else [],
                     "timestamp_formatted": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
 
-            return jsonify({"locations": all_locations, "device_name": "Child Safety Watch 1 (State: " + latest_status + ")"})
+            return jsonify({"locations": all_locations, "device_name": f"{watch_display_name} (State: {latest_status})"})
         else:
             result = None
             request_uuid = generate_random_uuid()

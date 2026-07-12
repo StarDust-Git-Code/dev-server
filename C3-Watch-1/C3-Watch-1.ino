@@ -28,7 +28,7 @@
 #define I2C_SCL             7
 
 // ─── Watch 1 EIDs ───
-const char* EID_NORMAL = "8fae9114e8a9c8f58a32215217fb4872f822102f";
+const char* EID_NORMAL = "3598111fa3593a2dfeb82c6a94f06173fdf05bf6";
 const char* EID_STRAP  = "dc534cfd453b70412d1d0be0f3ac656e2c3c6556";
 const char* EID_SOS    = "944960cda57bbf2a6d7711b191fd5584f561bf62";
 
