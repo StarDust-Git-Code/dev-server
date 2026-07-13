@@ -1,12 +1,27 @@
 /*
  * Google Find My Device Network (FMDN) - Child Safety Watch 1
- * Ultra-Low-Power Deep Sleep Architecture
+ * Ultra-Low-Power Deep Sleep Architecture + OTA
  *
- * Features:
- *   - EID Multiplexing
- *   - Wear Detection via MAX30102 (I2C)
- *   - SOS Button Support
- *   - Proper BLE Duty Cycle for Google Find My Tracking
+ * Fixes vs. previous version:
+ *   - Pins aligned to the proven-working wiring (SOS on GPIO9, MAX30102 on I2C 6/7,
+ *     no separate sensor power pin). The old GPIO0/GPIO1 mapping did not match the
+ *     working hardware and silently broke SOS / wear detection.
+ *   - Longer on-air window (6 s) and a NimBLE startup delay so the short deep-sleep
+ *     wake actually transmits before the window closes.
+ *   - EIDs are kept as constants. They MUST equal the values printed by
+ *     scripts/register_watches.py for the names watch_1_normal / watch_1_strap /
+ *     watch_1_sos. If they do not match a registered tracker, Google never reports
+ *     a location (the #1 reason this "didn't work").
+ *
+ * OTA:
+ *   - Hold the SOS button ~3-7s on a wake to enter OTA mode (blue LED blinks fast).
+ *     The watch connects WiFi and serves Arduino OTA until the upload finishes or
+ *     OTA_SERVE_MS elapses, then returns to normal operation. Battery is unaffected
+ *     during normal operation because WiFi is only brought up in OTA mode.
+ *
+ * NOTE: This uses a static EID + 4-day precompute trick (same as sketch_jul7a).
+ * Re-run scripts/register_watches.py before the registration window expires, or
+ * implement on-device EID rotation for unlimited operation.
  */
 
 #include <BLEDevice.h>
@@ -20,26 +35,43 @@
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 
-// ─── Hardware Pins ───
-#define BLUE_LED            8     // Active LOW — onboard blue LED
-#define SOS_BUTTON_PIN      0     // GPIO0 — SOS button (Active LOW, internal pull-up)
-#define MAX30102_POWER_PIN  1     // GPIO1 → MAX30102 VIN (software power control)
-#define I2C_SDA             6
-#define I2C_SCL             7
+// ─── OTA Config (set ENABLE_OTA to false to exclude WiFi/OTA and save flash) ───
+#define ENABLE_OTA         true
+#define WIFI_SSID          "YOUR_SSID"
+#define WIFI_PASSWORD      "YOUR_PASSWORD"
+#define OTA_PASSWORD       ""      // set non-empty to require a password in the Arduino IDE
+#define OTA_HOSTNAME       "cw1-ota"
+#define OTA_SERVE_MS       120000  // serve OTA up to 2 min per wake when in OTA mode
+#define OTA_TRIGGER_MS     3000    // hold SOS this long (but < SLEEP_HOLD_MS) to enter OTA mode
 
-// ─── Watch 1 EIDs ───
+#if ENABLE_OTA
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+volatile bool otaUpdating = false;
+#endif
+
+// ─── Hardware Pins (match the working board) ───
+#define BLUE_LED          8     // Active LOW — onboard blue LED
+#define SOS_BUTTON_PIN    9     // GPIO9 — SOS button (Active LOW, internal pull-up)
+#define I2C_SDA           6
+#define I2C_SCL           7
+// Optional power gating: wire GPIO1 to MAX30102 VIN and uncomment to save power.
+// #define MAX30102_POWER_PIN  1
+
+// ─── EIDs (REPLACE with scripts/register_watches.py output for watch_1_*) ───
 const char* EID_NORMAL = "3598111fa3593a2dfeb82c6a94f06173fdf05bf6";
 const char* EID_STRAP  = "dc534cfd453b70412d1d0be0f3ac656e2c3c6556";
 const char* EID_SOS    = "944960cda57bbf2a6d7711b191fd5584f561bf62";
 
 // ─── Timing Config ───
-#define SLEEP_DURATION_US   20000000    // 20s deep sleep cycle
-#define BLE_ADV_ACTIVE_MS   2000        // Advertise for 2s per wake
-#define BLE_ADV_INTERVAL    320         // 200ms in BLE units (0.625ms/unit)
-#define SENSOR_WARMUP_MS    200         // Stabilisation time for MAX30102
-#define IR_WORN_THRESHOLD   70000       // Skin contact threshold
-#define BOOT_HOLD_MS        6000        // 6s hold to boot from power-off
-#define SLEEP_HOLD_MS       7000        // 7s hold to enter power-off sleep
+#define SLEEP_DURATION_US   15000000   // 15s deep sleep cycle
+#define BLE_ADV_ACTIVE_MS   6000       // Advertise 6s per wake (was 2s — too short)
+#define BLE_NIMBLE_WARMUP_MS 500       // Let NimBLE come up after deep-sleep reboot
+#define BLE_ADV_INTERVAL    320        // 200ms in BLE units (0.625ms/unit)
+#define SENSOR_WARMUP_MS    200        // Stabilisation time for MAX30102
+#define IR_WORN_THRESHOLD   70000      // Skin contact threshold
+#define BOOT_HOLD_MS        6000       // 6s hold to boot from power-off
+#define SLEEP_HOLD_MS       7000       // 7s hold to enter power-off sleep
 
 // ─── States ───
 enum WatchState { STATE_NORMAL = 0, STATE_STRAP_REMOVED = 1, STATE_SOS = 2 };
@@ -48,6 +80,7 @@ enum WatchState { STATE_NORMAL = 0, STATE_STRAP_REMOVED = 1, STATE_SOS = 2 };
 RTC_DATA_ATTR static int      rtc_state      = STATE_NORMAL;
 RTC_DATA_ATTR static uint32_t sos_cycles     = 0;   // Remaining SOS cycles
 RTC_DATA_ATTR static int      rtc_sleep_mode = 0;   // 0=normal sleep, 1=power-off
+RTC_DATA_ATTR static bool     rtc_ota_mode   = false;
 
 // ─── Utilities ───
 inline void ledOn()  { digitalWrite(BLUE_LED, LOW);  }
@@ -73,18 +106,68 @@ void randomizeMAC() {
     ble_hs_id_set_rnd(addr);
 }
 
-// ─── MAX30102 Power & Read ───
-uint32_t readIR() {
-    digitalWrite(MAX30102_POWER_PIN, HIGH); // Power sensor on
-    delay(SENSOR_WARMUP_MS);
+// ─── OTA ───
+#if ENABLE_OTA
+void otaSetup() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    if (strlen(OTA_PASSWORD) > 0) ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.onStart([]() {
+        otaUpdating = true;
+        ledOn();
+        Serial.println("\n[OTA] Update start");
+    });
+    ArduinoOTA.onEnd([]() {
+        otaUpdating = false;
+        Serial.println("\n[OTA] Update done, rebooting");
+    });
+    ArduinoOTA.onProgress([](unsigned int p, unsigned int t) {
+        Serial.printf("[OTA] %u%%\n", p * 100 / t);
+    });
+    ArduinoOTA.onError([](ota_error_t e) {
+        otaUpdating = false;
+        Serial.printf("[OTA] Error[%u]\n", e);
+    });
+    ArduinoOTA.begin();
+}
 
+void runOTA() {
+    Serial.println("[OTA] Connecting WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        digitalWrite(BLUE_LED, ((millis() / 100) % 2 == 0) ? LOW : HIGH);
+        delay(100);
+    }
+    ledOff();
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[OTA] WiFi failed — returning to normal mode");
+        WiFi.mode(WIFI_OFF);
+        rtc_ota_mode = false;
+        return;
+    }
+    Serial.printf("[OTA] WiFi connected (%s). Serving OTA...\n", WiFi.localIP().toString().c_str());
+    otaSetup();
+    unsigned long otaStart = millis();
+    while (otaUpdating || (millis() - otaStart < (uint32_t)OTA_SERVE_MS)) {
+        ArduinoOTA.handle();
+        delay(10);
+    }
+    WiFi.mode(WIFI_OFF);
+    rtc_ota_mode = false;
+    Serial.println("[OTA] Serve window ended.");
+}
+#endif
+
+// ─── MAX30102 Read (sensor assumed always powered) ───
+uint32_t readIR() {
     Wire.begin(I2C_SDA, I2C_SCL);
     MAX30105 sensor;
     uint32_t ir = 0;
 
     if (sensor.begin(Wire, I2C_SPEED_FAST)) {
         sensor.setup();
-        delay(100);
+        delay(SENSOR_WARMUP_MS);
         ir = sensor.getIR();
         Serial.printf("[MAX30102] IR = %u\n", ir);
     } else {
@@ -92,18 +175,18 @@ uint32_t readIR() {
     }
 
     Wire.end();
-    digitalWrite(MAX30102_POWER_PIN, LOW); // Power sensor off
     return ir;
 }
 
 // ─── BLE Advertisement ───
 void advertiseBLE(const char* eid, int state) {
     uint8_t sd[22];
-    sd[0] = 0x41; // Frame type (Eddystone-EID type equivalent in Find My)
+    sd[0] = 0x41; // FMDN frame type
     hex_to_bytes(eid, &sd[1], 20);
-    sd[21] = 0x00;
+    sd[21] = 0x00; // Hashed flags
 
     BLEDevice::init("CW-1");
+    delay(BLE_NIMBLE_WARMUP_MS); // Critical after deep-sleep reboot
     BLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
     randomizeMAC();
 
@@ -113,12 +196,12 @@ void advertiseBLE(const char* eid, int state) {
 
     BLEAdvertisementData payload;
     payload.setFlags(0x06);
-    
+
     // Construct String safely avoiding null truncation
     String sdStr;
     sdStr.reserve(22);
     for (int i = 0; i < 22; i++) sdStr += (char)sd[i];
-    
+
     payload.setServiceData(BLEUUID((uint16_t)0xFEAA), sdStr);
     adv->setAdvertisementData(payload);
     adv->setScanResponse(false);
@@ -150,10 +233,11 @@ void advertiseBLE(const char* eid, int state) {
 
 // ─── Sleep Modes ───
 void goSleep() {
-    Serial.println("[Sleep] Normal timer + GPIO wake (20s)");
+    Serial.println("[Sleep] Normal timer + GPIO wake (15s)");
     Serial.flush();
     ledOff();
     rtc_sleep_mode = 0;
+    rtc_ota_mode = false; // any unserved OTA attempt ends on a normal sleep
     esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_DURATION_US);
     esp_deep_sleep_enable_gpio_wakeup(1ULL << SOS_BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
@@ -176,11 +260,19 @@ void setup() {
 
     pinMode(BLUE_LED, OUTPUT);         ledOff();
     pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(MAX30102_POWER_PIN, OUTPUT);
-    digitalWrite(MAX30102_POWER_PIN, LOW); 
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    Serial.printf("\n[Boot] Wakeup=%d | Mode=%d\n", cause, rtc_sleep_mode);
+    Serial.printf("\n[Boot] Wakeup=%d | Mode=%d | State=%d | OTA=%d\n",
+                  cause, rtc_sleep_mode, rtc_state, (int)rtc_ota_mode);
+
+#if ENABLE_OTA
+    // If OTA mode was requested, keep serving on every wake until done/timeout.
+    if (rtc_ota_mode) {
+        runOTA();
+        goSleep();
+        return;
+    }
+#endif
 
     // [Case A] Waking from Power-Off Mode (requires long hold)
     if (cause == ESP_SLEEP_WAKEUP_GPIO && rtc_sleep_mode == 1) {
@@ -202,7 +294,7 @@ void setup() {
         rtc_state = STATE_NORMAL;
         sos_cycles = 0;
     }
-    // [Case B] Waking from Normal Sleep via SOS Button
+    // [Case B] Waking from Normal Sleep via SOS Button (also handles OTA entry)
     else if (cause == ESP_SLEEP_WAKEUP_GPIO && rtc_sleep_mode == 0) {
         uint32_t hold = millis();
         while (digitalRead(SOS_BUTTON_PIN) == LOW) {
@@ -213,11 +305,22 @@ void setup() {
                 Serial.println("[Sleep] Turning OFF...");
                 rtc_state = STATE_NORMAL;
                 sos_cycles = 0;
-                goPowerOffSleep(); 
+                goPowerOffSleep();
             }
             delay(10);
         }
         ledOff();
+        uint32_t held = millis() - hold;
+#if ENABLE_OTA
+        if (held >= (uint32_t)OTA_TRIGGER_MS) {
+            Serial.println("[OTA] Entering OTA mode");
+            rtc_ota_mode = true;
+            rtc_sleep_mode = 0;
+            runOTA();
+            goSleep();
+            return;
+        }
+#endif
         Serial.println("[SOS] Triggered!");
         rtc_state = STATE_SOS;
         sos_cycles = 3; // Broadcast SOS for a few cycles
@@ -261,12 +364,12 @@ void setup() {
     // Determine EID based on state
     const char* eid;
     switch (rtc_state) {
-        case STATE_SOS:          eid = EID_SOS;    Serial.println("[State] SOS"); break;
-        case STATE_STRAP_REMOVED: eid = EID_STRAP; Serial.println("[State] Strap Removed"); break;
+        case STATE_SOS:           eid = EID_SOS;    Serial.println("[State] SOS"); break;
+        case STATE_STRAP_REMOVED: eid = EID_STRAP;  Serial.println("[State] Strap Removed"); break;
         default:                  eid = EID_NORMAL; Serial.println("[State] Normal"); break;
     }
 
-    // Broadcast BLE payload for 2 seconds
+    // Broadcast BLE payload
     advertiseBLE(eid, rtc_state);
 
     // Deep Sleep

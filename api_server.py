@@ -5,9 +5,11 @@
 
 import os
 import binascii
+import concurrent.futures
 import datetime
 import hashlib
 import json
+import re
 import time
 import threading
 
@@ -53,8 +55,8 @@ telemetry_cache = {}
 telemetry_lock = threading.Lock()
 
 # In-memory cache for multiplexed EID groups
-WATCH_1_GROUP_CACHE = []
-WATCH_2_GROUP_CACHE = []
+# key = group number (1, 2, ...), value = list of (device_name, canonic_id)
+WATCH_GROUP_CACHE = {}
 
 @app.route('/api/devices', methods=['GET'])
 def list_devices():
@@ -63,12 +65,14 @@ def list_devices():
         result_hex = request_device_list()
         device_list = parse_device_list_protobuf(result_hex)
 
-        refresh_custom_trackers(device_list)
+        try:
+            refresh_custom_trackers(device_list)
+        except Exception:
+            pass
         canonic_ids = get_canonic_ids(device_list)
 
-        global WATCH_1_GROUP_CACHE, WATCH_2_GROUP_CACHE
-        WATCH_1_GROUP_CACHE = []
-        WATCH_2_GROUP_CACHE = []
+        global WATCH_GROUP_CACHE
+        WATCH_GROUP_CACHE = {}
 
         devices = []
         for idx, (device_name, canonic_id) in enumerate(canonic_ids, start=1):
@@ -81,25 +85,22 @@ def list_devices():
                 if canonic_id in telemetry_cache:
                     battery_pct = telemetry_cache[canonic_id].get("battery_pct")
                 if battery_pct is None:
-                    # Specific mapping check for test-1_C3
-                    if cleaned_id.startswith("6a3e56"):
-                        target_eid = "73e064d787129722a23cbc0239619b0192f3f418"
-                        if target_eid in telemetry_cache:
-                            battery_pct = telemetry_cache[target_eid].get("battery_pct")
-                    else:
-                        for key, val in telemetry_cache.items():
+                    for key, val in telemetry_cache.items():
                             if key.startswith(prefix) or prefix in key:
                                 battery_pct = val.get("battery_pct")
                                 break
 
-            if "watch_1_" in device_name:
-                # Exclude the old watch_1_normal since GoogleFindMyTools µC is used
-                if device_name != "watch_1_normal":
-                    WATCH_1_GROUP_CACHE.append((device_name, canonic_id))
-            elif "GoogleFindMyTools" in device_name:
-                WATCH_1_GROUP_CACHE.append(("watch_1_normal", canonic_id))
-            elif "watch_2_" in device_name:
-                WATCH_2_GROUP_CACHE.append((device_name, canonic_id))
+            # Exclude specific unwanted test/older devices
+            EXCLUDED_DEVICES = {"ESP32_S3", "test-1_C3", "c3-t2", "GoogleFindMyTools µC"}
+            if device_name in EXCLUDED_DEVICES:
+                continue
+
+            watch_match = re.match(r'watch_(\d+)_', device_name)
+            if watch_match:
+                group_num = int(watch_match.group(1))
+                if group_num not in WATCH_GROUP_CACHE:
+                    WATCH_GROUP_CACHE[group_num] = []
+                WATCH_GROUP_CACHE[group_num].append((device_name, canonic_id))
             else:
                 dev = {
                     "id": idx,
@@ -110,36 +111,22 @@ def list_devices():
                     dev["battery_pct"] = battery_pct
                 devices.append(dev)
                 
-        if WATCH_1_GROUP_CACHE:
+        # Create virtual devices for each watch group
+        for group_num in sorted(WATCH_GROUP_CACHE.keys()):
+            group_key = f"child_watch_group_{group_num}"
             watch_battery = None
             with telemetry_lock:
-                if "child_watch_group" in telemetry_cache:
-                    watch_battery = telemetry_cache["child_watch_group"].get("battery_pct")
+                if group_key in telemetry_cache:
+                    watch_battery = telemetry_cache[group_key].get("battery_pct")
             
             watch_dev = {
-                "id": 999,
-                "name": "Child Safety Watch 1",
-                "canonic_id": "child_watch_group",
+                "id": 900 + group_num,
+                "name": f"Child Safety Watch {group_num}",
+                "canonic_id": group_key,
             }
             if watch_battery is not None:
                 watch_dev["battery_pct"] = watch_battery
             devices.insert(0, watch_dev)
-
-        if WATCH_2_GROUP_CACHE:
-            watch2_battery = None
-            with telemetry_lock:
-                if "child_watch_2_group" in telemetry_cache:
-                    watch2_battery = telemetry_cache["child_watch_2_group"].get("battery_pct")
-            
-            watch2_dev = {
-                "id": 998,
-                "name": "Child Safety Watch 2",
-                "canonic_id": "child_watch_2_group",
-            }
-            if watch2_battery is not None:
-                watch2_dev["battery_pct"] = watch2_battery
-            # Insert below Watch 1
-            devices.insert(1, watch2_dev)
 
         return jsonify({"devices": devices})
     except Exception as e:
@@ -149,6 +136,7 @@ def list_devices():
 @app.route('/api/locate', methods=['POST'])
 def locate_device():
     """Fetch and decrypt live location for a specific tracker."""
+    global WATCH_GROUP_CACHE  # declared here so it's valid throughout the function
     try:
         data = flask_request.get_json()
         canonic_id = data.get('canonic_id')
@@ -159,11 +147,45 @@ def locate_device():
 
         print(f"[API] Requesting location data for {name}...")
 
-        if canonic_id in ("child_watch_group", "child_watch_2_group"):
-            import concurrent.futures
-            
-            group_cache = WATCH_1_GROUP_CACHE if canonic_id == "child_watch_group" else WATCH_2_GROUP_CACHE
-            watch_display_name = "Child Safety Watch 1" if canonic_id == "child_watch_group" else "Child Safety Watch 2"
+        if canonic_id.startswith("child_watch_group"):
+            # Extract group number from canonic_id (e.g., "child_watch_group_1" -> 1)
+            group_match = re.search(r'(\d+)$', canonic_id)
+            group_num = int(group_match.group(1)) if group_match else 1
+            group_eids = WATCH_GROUP_CACHE.get(group_num, [])
+
+            # Cache empty (e.g. server restart) — auto-rebuild before giving up
+            if not group_eids:
+                print(f"[API] WATCH_GROUP_CACHE empty for group {group_num} — auto-refreshing device list...")
+                try:
+                    result_hex = request_device_list()
+                    device_list = parse_device_list_protobuf(result_hex)
+                    try:
+                        refresh_custom_trackers(device_list)
+                    except Exception:
+                        pass
+                    canonic_ids = get_canonic_ids(device_list)
+
+                    WATCH_GROUP_CACHE = {}
+
+                    EXCLUDED_DEVICES = {"ESP32_S3", "test-1_C3", "c3-t2", "GoogleFindMyTools µC"}
+                    for _, (d_name, d_canonic) in enumerate(canonic_ids, start=1):
+                        if d_name in EXCLUDED_DEVICES:
+                            continue
+                        m = re.match(r'watch_(\d+)_', d_name)
+                        if m:
+                            gn = int(m.group(1))
+                            if gn not in WATCH_GROUP_CACHE:
+                                WATCH_GROUP_CACHE[gn] = []
+                            WATCH_GROUP_CACHE[gn].append((d_name, d_canonic))
+
+                    group_eids = WATCH_GROUP_CACHE.get(group_num, [])
+                    print(f"[API] Auto-refresh done — group {group_num} has {len(group_eids)} EIDs")
+                except Exception as refresh_err:
+                    print(f"[API] Auto-refresh failed: {refresh_err}")
+
+            if not group_eids:
+                return jsonify({"error": f"No EIDs registered for watch group {group_num}. Check that the watches are registered."}), 400
+
             
             def fetch_single(d_name, d_canonic):
                 """Helper to fetch location for a single EID in the group."""
@@ -194,7 +216,7 @@ def locate_device():
             
             # Fetch all multiplexed EIDs in parallel to avoid 90-second delays
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [executor.submit(fetch_single, n, c) for n, c in group_cache]
+                futures = [executor.submit(fetch_single, n, c) for n, c in group_eids]
                 for future in concurrent.futures.as_completed(futures):
                     locs, d_name = future.result()
                     for l in locs:
@@ -212,15 +234,15 @@ def locate_device():
                 elif "strap" in most_recent_source:
                     latest_status = "Strap Removed"
             
-            # Inject fake telemetry so dashboard shows it
+            # Inject telemetry so dashboard shows it
             with telemetry_lock:
                 telemetry_cache[canonic_id] = {
-                    "battery_pct": 100, # Fake, or could be passed
+                    "battery_pct": 100,
                     "active_events": [latest_status] if latest_status != "Normal" else [],
                     "timestamp_formatted": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
 
-            return jsonify({"locations": all_locations, "device_name": f"{watch_display_name} (State: {latest_status})"})
+            return jsonify({"locations": all_locations, "device_name": f"Child Safety Watch {group_num} (State: {latest_status})"})
         else:
             result = None
             request_uuid = generate_random_uuid()
@@ -438,12 +460,6 @@ def get_device_telemetry(device_id):
     """
     with telemetry_lock:
         cleaned_id = device_id.replace("-", "").lower()
-        
-        # Explicit mapping for test-1_C3 (canonic prefix '6a3e56' -> EID '3c7a00ec95...')
-        if cleaned_id.startswith("6a3e56"):
-            target_eid = "73e064d787129722a23cbc0239619b0192f3f418"
-            if target_eid in telemetry_cache:
-                return jsonify(telemetry_cache[target_eid])
         
         # Try exact lookup first
         if device_id in telemetry_cache:
